@@ -10,6 +10,11 @@ The initial implementation focuses on reproducible benchmark outputs:
 - hardware-agnostic device abstractions
 - WAV-based audio quality metrics
 
+## Benchmark Standard
+
+The long-term evaluation methodology is defined in
+[`docs/benchmark_spec.md`](docs/benchmark_spec.md).
+
 ## Run An Audio Quality Benchmark
 
 ```bash
@@ -39,4 +44,3 @@ tests/
 
 EchoLab avoids microphone-specific assumptions. Device-specific integrations
 should implement the shared interfaces under `echolab.devices`.
-
