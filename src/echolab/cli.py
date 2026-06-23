@@ -66,6 +66,10 @@ def main() -> int:
         return 0
 
     if args.command == "benchmark" and args.benchmark_command == "wake-asr":
+        if args.interactive_mode:
+            args = _prompt_wake_asr_args(args)
+        if not args.mic:
+            parser.error("echolab benchmark wake-asr requires --mic unless --interactive is used")
         config = WakeAsrConfig(
             microphones=tuple(parse_mic(value) for value in args.mic),
             output_dir=args.out,
@@ -80,7 +84,7 @@ def main() -> int:
             channels=args.channels,
             trials_per_case=args.trials,
             record=not args.no_record,
-            interactive=not args.non_interactive,
+            interactive=args.interactive_mode or not args.non_interactive,
             record_command=args.record_command,
             wake_command=args.wake_command,
             asr_command=args.asr_command,
@@ -159,7 +163,6 @@ def _build_parser() -> argparse.ArgumentParser:
     wake_asr.add_argument(
         "--mic",
         action="append",
-        required=True,
         help="Microphone in NAME=ALSA_DEVICE format. Repeat for each mic.",
     )
     wake_asr.add_argument("--out", type=Path, default=Path("reports/wake-asr"), help="Output directory.")
@@ -186,6 +189,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional ASR command template. Supports {wav_path}; should print JSON with text/latency_ms or plain text.",
     )
     wake_asr.add_argument("--no-record", action="store_true", help="Skip recording and only write/scoring planned trials.")
+    wake_asr.add_argument("--interactive", dest="interactive_mode", action="store_true", help="Prompt for setup and step through each trial.")
     wake_asr.add_argument("--non-interactive", action="store_true", help="Do not prompt before each recording.")
 
     placement = benchmark_subparsers.add_parser(
@@ -239,6 +243,50 @@ def _build_parser() -> argparse.ArgumentParser:
     placement.add_argument("--non-interactive", action="store_true", help="Do not prompt before each recording.")
 
     return parser
+
+
+def _prompt_wake_asr_args(args: argparse.Namespace) -> argparse.Namespace:
+    print("EchoLab interactive Wake + ASR benchmark")
+    print("Press Enter to accept defaults shown in brackets.")
+    print()
+
+    args.mic = args.mic or _prompt_mics()
+    args.out = Path(_prompt_text("Output directory", str(args.out)))
+    args.distances = _prompt_text("Distances, comma-separated meters", args.distances)
+    args.angles = _prompt_text("Angles, comma-separated", args.angles)
+    args.trials = int(_prompt_text("Trials per condition", str(args.trials)))
+    args.speaker_label = _prompt_text("Speaker label", args.speaker_label)
+    args.condition = _prompt_text("Condition", args.condition)
+    args.utterance = _prompt_text("Utterance prompt", args.utterance)
+    expected = _prompt_text("Expected ASR text, optional", args.expected_text or "")
+    args.expected_text = expected or None
+    wake_command = _prompt_text("Wake scorer command, optional", args.wake_command or "")
+    args.wake_command = wake_command or None
+    asr_command = _prompt_text("ASR command, optional", args.asr_command or "")
+    args.asr_command = asr_command or None
+    return args
+
+
+def _prompt_mics() -> list[str]:
+    mics: list[str] = []
+    while True:
+        default = "ReSpeaker mono=plughw:2,0" if not mics else ""
+        value = _prompt_text("Mic NAME=DEVICE, blank when done", default)
+        if not value:
+            if mics:
+                return mics
+            print("At least one microphone is required.")
+            continue
+        mics.append(value)
+        another = _prompt_text("Add another mic? y/N", "n").lower()
+        if another not in {"y", "yes"}:
+            return mics
+
+
+def _prompt_text(label: str, default: str) -> str:
+    suffix = f" [{default}]" if default else ""
+    value = input(f"{label}{suffix}: ").strip()
+    return value if value else default
 
 
 if __name__ == "__main__":

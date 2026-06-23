@@ -89,6 +89,7 @@ class WakeAsrTrial:
     asr_latency_ms: float | None = None
     asr_score: float | None = None
     asr_raw: dict[str, Any] = field(default_factory=dict)
+    notes: str | None = None
     error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -121,6 +122,7 @@ class WakeAsrTrial:
             "asr_latency_ms": self.asr_latency_ms,
             "asr_score": self.asr_score,
             "asr_raw": self.asr_raw,
+            "notes": self.notes,
             "error": self.error,
         }
 
@@ -139,17 +141,85 @@ def collect_wake_asr_trials(config: WakeAsrConfig) -> list[WakeAsrTrial]:
     audio_dir.mkdir(parents=True, exist_ok=True)
 
     trials: list[WakeAsrTrial] = []
+    total_trials = (
+        len(config.placement_names)
+        * len(config.microphones)
+        * len(config.distances_m)
+        * len(config.angles)
+        * config.trials_per_case
+    )
+    completed_trials = 0
     for placement_name in config.placement_names:
         for mic in config.microphones:
             for distance_m in config.distances_m:
                 for angle in config.angles:
                     for trial_index in range(1, config.trials_per_case + 1):
+                        completed_trials += 1
                         trial_id = _trial_id(placement_name, mic.name, distance_m, angle, trial_index)
                         wav_path = audio_dir / f"{trial_id}.wav"
+                        trial_notes: str | None = None
                         if config.interactive and config.record:
-                            _prompt_for_trial(placement_name, mic, distance_m, angle, config, trial_index)
+                            action, trial_notes = _prompt_for_trial(
+                                placement_name,
+                                mic,
+                                distance_m,
+                                angle,
+                                config,
+                                trial_index,
+                                completed_trials,
+                                total_trials,
+                            )
+                            if action == "quit":
+                                return trials
+                            if action == "skip":
+                                trial = _score_trial(
+                                    config,
+                                    placement_name,
+                                    mic,
+                                    distance_m,
+                                    angle,
+                                    trial_index,
+                                    wav_path,
+                                    "skipped by operator",
+                                    trial_notes,
+                                )
+                                trials.append(trial)
+                                continue
                         error = _record_trial(config, mic, wav_path) if config.record else None
-                        trial = _score_trial(config, placement_name, mic, distance_m, angle, trial_index, wav_path, error)
+                        if config.interactive and config.record:
+                            action, after_notes = _prompt_after_trial()
+                            trial_notes = _merge_notes(trial_notes, after_notes)
+                            if action == "retry":
+                                error = _record_trial(config, mic, wav_path)
+                                action, after_retry_notes = _prompt_after_trial()
+                                trial_notes = _merge_notes(trial_notes, after_retry_notes)
+                            if action == "skip":
+                                error = "skipped by operator after recording"
+                            if action == "quit":
+                                trial = _score_trial(
+                                    config,
+                                    placement_name,
+                                    mic,
+                                    distance_m,
+                                    angle,
+                                    trial_index,
+                                    wav_path,
+                                    error,
+                                    trial_notes,
+                                )
+                                trials.append(trial)
+                                return trials
+                        trial = _score_trial(
+                            config,
+                            placement_name,
+                            mic,
+                            distance_m,
+                            angle,
+                            trial_index,
+                            wav_path,
+                            error,
+                            trial_notes,
+                        )
                         trials.append(trial)
     return trials
 
@@ -210,6 +280,7 @@ def write_wake_asr_csv(trials: list[WakeAsrTrial], path: Path) -> None:
         "asr_text",
         "asr_latency_ms",
         "asr_score",
+        "notes",
         "error",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -450,6 +521,7 @@ def _score_trial(
     trial_index: int,
     wav_path: Path,
     error: str | None,
+    notes: str | None = None,
 ) -> WakeAsrTrial:
     trial_id = _trial_id(placement_name, mic.name, distance_m, angle, trial_index)
     timestamp = datetime.now(UTC).isoformat()
@@ -510,6 +582,7 @@ def _score_trial(
         asr_latency_ms=asr_latency_ms,
         asr_score=_text_similarity(config.expected_text, asr_text),
         asr_raw=asr_raw,
+        notes=notes,
         error=error,
     )
 
@@ -598,14 +671,38 @@ def _prompt_for_trial(
     angle: str,
     config: WakeAsrConfig,
     trial_index: int,
-) -> None:
+    completed_trials: int,
+    total_trials: int,
+) -> tuple[str, str | None]:
     print()
+    print(f"Trial {completed_trials}/{total_trials}")
     print(f"Placement: {placement_name}")
     print(f"Mic: {mic.name} ({mic.device})")
     print(f"Distance: {distance_m} m / Angle: {angle} / Trial: {trial_index}")
     print(f"Speaker: {config.speaker_label} / Condition: {config.condition}")
     print(f"Utterance: {config.utterance}")
-    input("Press Enter, then speak after recording starts...")
+    response = input("Press Enter to record, s=skip, q=quit, or type a note: ").strip()
+    if response.lower() == "s":
+        return "skip", None
+    if response.lower() == "q":
+        return "quit", None
+    return "record", response or None
+
+
+def _prompt_after_trial() -> tuple[str, str | None]:
+    response = input("Recorded. Press Enter to keep, r=retry, s=skip, q=quit, or type a note: ").strip()
+    if response.lower() == "r":
+        return "retry", None
+    if response.lower() == "s":
+        return "skip", None
+    if response.lower() == "q":
+        return "quit", None
+    return "keep", response or None
+
+
+def _merge_notes(first: str | None, second: str | None) -> str | None:
+    notes = [note for note in (first, second) if note]
+    return " | ".join(notes) if notes else None
 
 
 def _text_similarity(expected: str | None, actual: str | None) -> float | None:

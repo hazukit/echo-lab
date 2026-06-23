@@ -115,6 +115,17 @@ The report compares wake detection rate, false negatives, confidence, latency,
 audio RMS/peak, distance drop-off, angle effects, and the recommended GeePi
 capture configuration.
 
+For repeated real-world trials, use the interactive mode:
+
+```bash
+echolab benchmark wake-asr --interactive
+```
+
+Interactive mode prompts for microphones, distances, angles, trials, speaker,
+condition, utterance, and optional scorer commands. During the run it shows
+trial progress and allows each trial to be kept, retried, skipped, annotated, or
+used as the point to quit.
+
 ## Run A GeePi Placement Benchmark
 
 Use the placement benchmark to compare physical microphone locations while
