@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -75,6 +76,35 @@ class WakeAsrTest(unittest.TestCase):
             payload = json.loads((output_dir / "wake_asr_results.json").read_text(encoding="utf-8"))
             self.assertEqual(payload["benchmark"], "wake_asr")
             self.assertEqual(payload["metadata"]["condition"], "quiet")
+
+    def test_run_wake_asr_benchmark_executes_wake_plugin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir)
+            command = (
+                f"{sys.executable} -c "
+                "\"import json; print(json.dumps({'detected': True, 'confidence': 0.88, 'latency_ms': 250}))\""
+            )
+            config = WakeAsrConfig(
+                microphones=(MicConfig(name="ReSpeaker", device="plughw:2,0"),),
+                output_dir=output_dir,
+                distances_m=(0.5,),
+                angles=("front",),
+                speaker_label="adult",
+                condition="quiet",
+                utterance="Hey GeePi",
+                record=False,
+                interactive=False,
+                wake_command=command,
+            )
+
+            trials = run_wake_asr_benchmark(config)
+
+            self.assertTrue(trials[0].wake_detected)
+            self.assertEqual(trials[0].wake_confidence, 0.88)
+            self.assertEqual(trials[0].plugin_results[0].plugin_type, "wake_word")
+            payload = json.loads((output_dir / "wake_asr_results.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["trials"][0]["plugin_results"][0]["plugin_type"], "wake_word")
+            self.assertIn("plugin_results_json", (output_dir / "wake_asr_results.csv").read_text(encoding="utf-8"))
 
     def test_extract_channel_wav_writes_mono_channel(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

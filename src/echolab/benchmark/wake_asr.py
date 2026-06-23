@@ -13,6 +13,7 @@ from statistics import mean
 from typing import Any
 
 from echolab.analysis.audio_quality import analyze_wav
+from echolab.plugins import AudioPlugin, CommandAsrPlugin, CommandWakeWordPlugin, PluginContext, PluginResult
 
 
 DEFAULT_DISTANCES_M = (0.5, 1.0, 2.0, 3.0)
@@ -89,6 +90,7 @@ class WakeAsrTrial:
     asr_latency_ms: float | None = None
     asr_score: float | None = None
     asr_raw: dict[str, Any] = field(default_factory=dict)
+    plugin_results: tuple[PluginResult, ...] = ()
     notes: str | None = None
     error: str | None = None
 
@@ -122,6 +124,7 @@ class WakeAsrTrial:
             "asr_latency_ms": self.asr_latency_ms,
             "asr_score": self.asr_score,
             "asr_raw": self.asr_raw,
+            "plugin_results": [result.to_dict() for result in self.plugin_results],
             "notes": self.notes,
             "error": self.error,
         }
@@ -139,6 +142,8 @@ def collect_wake_asr_trials(config: WakeAsrConfig) -> list[WakeAsrTrial]:
     config.output_dir.mkdir(parents=True, exist_ok=True)
     audio_dir = config.output_dir / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
+    plugins = _build_plugins(config)
+    _initialize_plugins(plugins)
 
     trials: list[WakeAsrTrial] = []
     total_trials = (
@@ -170,10 +175,12 @@ def collect_wake_asr_trials(config: WakeAsrConfig) -> list[WakeAsrTrial]:
                                 total_trials,
                             )
                             if action == "quit":
+                                _shutdown_plugins(plugins)
                                 return trials
                             if action == "skip":
                                 trial = _score_trial(
                                     config,
+                                    plugins,
                                     placement_name,
                                     mic,
                                     distance_m,
@@ -198,6 +205,7 @@ def collect_wake_asr_trials(config: WakeAsrConfig) -> list[WakeAsrTrial]:
                             if action == "quit":
                                 trial = _score_trial(
                                     config,
+                                    plugins,
                                     placement_name,
                                     mic,
                                     distance_m,
@@ -208,9 +216,11 @@ def collect_wake_asr_trials(config: WakeAsrConfig) -> list[WakeAsrTrial]:
                                     trial_notes,
                                 )
                                 trials.append(trial)
+                                _shutdown_plugins(plugins)
                                 return trials
                         trial = _score_trial(
                             config,
+                            plugins,
                             placement_name,
                             mic,
                             distance_m,
@@ -221,10 +231,35 @@ def collect_wake_asr_trials(config: WakeAsrConfig) -> list[WakeAsrTrial]:
                             trial_notes,
                         )
                         trials.append(trial)
+    _shutdown_plugins(plugins)
     return trials
 
 
+def _build_plugins(config: WakeAsrConfig) -> tuple[AudioPlugin, ...]:
+    plugins: list[AudioPlugin] = []
+    if config.wake_command:
+        plugins.append(CommandWakeWordPlugin(config.wake_command))
+    if config.asr_command:
+        plugins.append(CommandAsrPlugin(config.asr_command))
+    return tuple(plugins)
+
+
+def _initialize_plugins(plugins: tuple[AudioPlugin, ...]) -> None:
+    for plugin in plugins:
+        plugin.initialize()
+
+
+def _shutdown_plugins(plugins: tuple[AudioPlugin, ...]) -> None:
+    for plugin in plugins:
+        plugin.shutdown()
+
+
+def _has_plugin_type(plugins: tuple[AudioPlugin, ...], plugin_type: str) -> bool:
+    return any(plugin.metadata().get("plugin_type") == plugin_type for plugin in plugins)
+
+
 def write_wake_asr_json(trials: list[WakeAsrTrial], config: WakeAsrConfig, path: Path) -> None:
+    plugins = _build_plugins(config)
     payload = {
         "benchmark": "wake_asr",
         "created_at": datetime.now(UTC).isoformat(),
@@ -242,8 +277,9 @@ def write_wake_asr_json(trials: list[WakeAsrTrial], config: WakeAsrConfig, path:
             "sample_rate_hz": config.sample_rate_hz,
             "channels": config.channels,
             "trials_per_case": config.trials_per_case,
-            "wake_configured": config.wake_command is not None,
-            "asr_configured": config.asr_command is not None,
+            "wake_configured": _has_plugin_type(plugins, "wake_word"),
+            "asr_configured": _has_plugin_type(plugins, "asr"),
+            "plugins": [plugin.metadata() for plugin in plugins],
         },
         "trials": [trial.to_dict() for trial in trials],
         "summary": summarize_wake_asr(trials),
@@ -280,6 +316,7 @@ def write_wake_asr_csv(trials: list[WakeAsrTrial], path: Path) -> None:
         "asr_text",
         "asr_latency_ms",
         "asr_score",
+        "plugin_results_json",
         "notes",
         "error",
     ]
@@ -290,10 +327,12 @@ def write_wake_asr_csv(trials: list[WakeAsrTrial], path: Path) -> None:
             row_data = trial.to_dict()
             row = {key: row_data[key] for key in fieldnames if key in row_data}
             row["false_negative"] = trial.wake_configured and trial.wake_detected is False
+            row["plugin_results_json"] = json.dumps(row_data["plugin_results"], sort_keys=True)
             writer.writerow(row)
 
 
 def write_wake_asr_markdown(trials: list[WakeAsrTrial], config: WakeAsrConfig, path: Path) -> None:
+    plugins = _build_plugins(config)
     summary = summarize_wake_asr(trials)
     best_wake = _best_device(summary, "wake_detection_rate")
     best_confidence = _best_device(summary, "mean_wake_confidence")
@@ -326,8 +365,9 @@ def write_wake_asr_markdown(trials: list[WakeAsrTrial], config: WakeAsrConfig, p
         f"- Distances: `{', '.join(str(distance) for distance in config.distances_m)} m`",
         f"- Angles: `{', '.join(config.angles)}`",
         f"- Trials per case: `{config.trials_per_case}`",
-        f"- Wake scoring configured: `{config.wake_command is not None}`",
-        f"- ASR configured: `{config.asr_command is not None}`",
+        f"- Wake scoring configured: `{_has_plugin_type(plugins, 'wake_word')}`",
+        f"- ASR configured: `{_has_plugin_type(plugins, 'asr')}`",
+        f"- Enabled plugins: `{', '.join(plugin.metadata()['plugin_name'] for plugin in plugins) or 'none'}`",
         "",
         "## Device Summary",
         "",
@@ -514,6 +554,7 @@ def _record_command(config: WakeAsrConfig, mic: MicConfig, wav_path: Path) -> li
 
 def _score_trial(
     config: WakeAsrConfig,
+    plugins: tuple[AudioPlugin, ...],
     placement_name: str,
     mic: MicConfig,
     distance_m: float,
@@ -527,6 +568,7 @@ def _score_trial(
     timestamp = datetime.now(UTC).isoformat()
     wake_raw: dict[str, Any] = {}
     asr_raw: dict[str, Any] = {}
+    plugin_results: tuple[PluginResult, ...] = ()
     scoring_wav_path = _prepare_scoring_wav(mic, wav_path) if error is None and wav_path.exists() else wav_path
     if error is None and scoring_wav_path is None:
         error = f"failed to extract channel {mic.extract_channel} from {wav_path}"
@@ -538,20 +580,37 @@ def _score_trial(
     asr_text: str | None = None
     asr_latency_ms: float | None = None
 
-    if error is None and config.wake_command:
-        wake_raw = _run_json_or_text_command(config.wake_command, scoring_wav_path)
-        wake_detected = _optional_bool(wake_raw.get("detected"))
-        wake_confidence = _optional_float(wake_raw.get("confidence"))
-        wake_latency_ms = _optional_float(wake_raw.get("latency_ms"))
-        if "error" in wake_raw:
-            error = str(wake_raw["error"])
-
-    if error is None and config.asr_command:
-        asr_raw = _run_json_or_text_command(config.asr_command, scoring_wav_path)
-        asr_text = _optional_str(asr_raw.get("text"))
-        asr_latency_ms = _optional_float(asr_raw.get("latency_ms"))
-        if "error" in asr_raw:
-            error = str(asr_raw["error"])
+    if error is None and plugins:
+        context = PluginContext(
+            wav_path=scoring_wav_path,
+            trial_id=trial_id,
+            metadata={
+                "mic_name": mic.name,
+                "input_device": mic.device,
+                "placement_name": placement_name,
+                "distance_m": distance_m,
+                "angle": angle,
+                "speaker_label": config.speaker_label,
+                "condition": config.condition,
+                "utterance": config.utterance,
+            },
+        )
+        plugin_results = tuple(plugin.run(context) for plugin in plugins)
+        wake_result = _first_plugin_result(plugin_results, "wake_word")
+        if wake_result is not None:
+            wake_raw = wake_result.data
+            wake_detected = _optional_bool(wake_raw.get("detected"))
+            wake_confidence = _optional_float(wake_raw.get("confidence"))
+            wake_latency_ms = _optional_float(wake_raw.get("latency_ms"))
+            if wake_result.error:
+                error = wake_result.error
+        asr_result = _first_plugin_result(plugin_results, "asr")
+        if asr_result is not None:
+            asr_raw = asr_result.data
+            asr_text = _optional_str(asr_raw.get("text"))
+            asr_latency_ms = _optional_float(asr_raw.get("latency_ms"))
+            if asr_result.error:
+                error = asr_result.error
 
     return WakeAsrTrial(
         trial_id=trial_id,
@@ -582,6 +641,7 @@ def _score_trial(
         asr_latency_ms=asr_latency_ms,
         asr_score=_text_similarity(config.expected_text, asr_text),
         asr_raw=asr_raw,
+        plugin_results=plugin_results,
         notes=notes,
         error=error,
     )
@@ -632,29 +692,15 @@ def _extract_channel_wav(source_path: Path, output_path: Path, channel_index: in
         output.writeframes(bytes(selected))
 
 
-def _run_json_or_text_command(command_template: str, wav_path: Path) -> dict[str, Any]:
-    command = _format_command(command_template, {"wav_path": str(wav_path)})
-    try:
-        completed = subprocess.run(command, check=True, capture_output=True, text=True)
-    except FileNotFoundError as exc:
-        return {"error": f"command not found: {exc.filename}"}
-    except subprocess.CalledProcessError as exc:
-        return {"error": f"command failed with exit {exc.returncode}: {exc.stderr.strip()}"}
-
-    stdout = completed.stdout.strip()
-    if not stdout:
-        return {}
-    try:
-        parsed = json.loads(stdout)
-    except json.JSONDecodeError:
-        return {"text": stdout}
-    if isinstance(parsed, dict):
-        return parsed
-    return {"value": parsed}
+def _first_plugin_result(results: tuple[PluginResult, ...], plugin_type: str) -> PluginResult | None:
+    return next((result for result in results if result.plugin_type == plugin_type), None)
 
 
 def _format_command(template: str, values: dict[str, str]) -> list[str]:
-    return [part.format(**values) for part in shlex.split(template)]
+    formatted = template
+    for key, value in values.items():
+        formatted = formatted.replace("{" + key + "}", value)
+    return shlex.split(formatted)
 
 
 def _trial_id(placement_name: str, mic_name: str, distance_m: float, angle: str, trial_index: int) -> str:

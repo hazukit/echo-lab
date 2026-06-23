@@ -15,6 +15,9 @@ The initial implementation focuses on reproducible benchmark outputs:
 The long-term evaluation methodology is defined in
 [`docs/benchmark_spec.md`](docs/benchmark_spec.md).
 
+The plugin contract for Wake Word, ASR, DOA, speaker, and future analyzers is
+defined in [`docs/plugin_architecture.md`](docs/plugin_architecture.md).
+
 ## Run An Audio Quality Benchmark
 
 ```bash
