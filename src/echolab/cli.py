@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
-from echolab.analysis import analyze_wav
+from echolab.analysis import analyze_wav, record_and_analyze_channels
 from echolab.benchmark import BenchmarkRun
 from echolab.benchmark.placement import PlacementBenchmarkConfig, parse_key_value, run_placement_benchmark
 from echolab.benchmark.wake_asr import (
@@ -12,6 +13,14 @@ from echolab.benchmark.wake_asr import (
     parse_mic,
     parse_str_list,
     run_wake_asr_benchmark,
+)
+from echolab.devices.alsa import (
+    inspect_alsa_capture_devices,
+    inspect_payload,
+    render_inspect_markdown,
+    write_inspect_csv,
+    write_inspect_json,
+    write_inspect_markdown,
 )
 from echolab.reporting import write_csv, write_json, write_markdown
 
@@ -30,6 +39,30 @@ def main() -> int:
         write_csv(run, out_base.with_suffix(".csv"))
         write_json(run, out_base.with_suffix(".json"))
         write_markdown(run, out_base.with_suffix(".md"))
+        return 0
+
+    if args.command == "inspect":
+        devices = inspect_alsa_capture_devices()
+        if args.out:
+            write_inspect_json(devices, args.out / "inspect_devices.json")
+            write_inspect_csv(devices, args.out / "inspect_devices.csv")
+            write_inspect_markdown(devices, args.out / "inspect_devices.md")
+        if args.json:
+            print(json.dumps(inspect_payload(devices), indent=2, sort_keys=True))
+        else:
+            print(render_inspect_markdown(devices), end="")
+        return 0
+
+    if args.command == "analyze" and args.analyze_command == "channels":
+        record_and_analyze_channels(
+            input_device=args.device,
+            output_dir=args.out,
+            duration_s=args.duration,
+            sample_rate_hz=args.sample_rate,
+            channels=args.channels,
+            sample_format=args.format,
+            record_command=args.record_command,
+        )
         return 0
 
     if args.command == "benchmark" and args.benchmark_command == "wake-asr":
@@ -95,6 +128,26 @@ def _build_parser() -> argparse.ArgumentParser:
     audio_quality = subparsers.add_parser("audio-quality", help="Analyze a PCM WAV file.")
     audio_quality.add_argument("wav_path", type=Path)
     audio_quality.add_argument("--out", type=Path, required=True, help="Output path without extension.")
+
+    inspect = subparsers.add_parser("inspect", help="Inspect available capture devices.")
+    output_format = inspect.add_mutually_exclusive_group()
+    output_format.add_argument("--json", action="store_true", help="Print machine-readable JSON to stdout.")
+    output_format.add_argument("--markdown", action="store_true", help="Print human-readable Markdown to stdout.")
+    inspect.add_argument("--out", type=Path, help="Optional output directory for JSON, CSV, and Markdown files.")
+
+    analyze = subparsers.add_parser("analyze", help="Analyze captured audio artifacts or devices.")
+    analyze_subparsers = analyze.add_subparsers(dest="analyze_command")
+    channels = analyze_subparsers.add_parser("channels", help="Record and analyze per-channel capture behavior.")
+    channels.add_argument("--device", default="default", help="ALSA capture device such as hw:2,0 or plughw:2,0.")
+    channels.add_argument("--out", type=Path, default=Path("reports/channels"), help="Output directory.")
+    channels.add_argument("--duration", type=float, default=3.0, help="Recording duration in seconds.")
+    channels.add_argument("--sample-rate", type=int, default=16000, help="Capture sample rate.")
+    channels.add_argument("--channels", type=int, default=1, help="Channel count to capture.")
+    channels.add_argument("--format", default="S16_LE", help="ALSA sample format.")
+    channels.add_argument(
+        "--record-command",
+        help="Optional recorder command template. Supports {wav_path}, {device}, {duration_s}, {sample_rate_hz}, {channels}, {format}.",
+    )
 
     benchmark = subparsers.add_parser("benchmark", help="Run an end-to-end benchmark scenario.")
     benchmark_subparsers = benchmark.add_subparsers(dest="benchmark_command")

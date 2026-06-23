@@ -35,6 +35,18 @@ On Raspberry Pi, identify ALSA device names first:
 arecord -l
 ```
 
+EchoLab can also inspect capture devices directly:
+
+```bash
+PYTHONPATH=src python -m echolab inspect
+PYTHONPATH=src python -m echolab inspect --json
+PYTHONPATH=src python -m echolab inspect --out reports/inspect
+```
+
+The inspect command reports ALSA card/device IDs, likely USB-facing names,
+native capture format, sample rate, channel count, mixer availability, and
+recommended GeePi mono and EchoLab native-analysis capture modes.
+
 Then run a quiet-room household baseline:
 
 ```bash
@@ -111,6 +123,29 @@ Outputs:
 - `reports/placement/placement_results.csv`
 - `reports/placement/placement_report.md`
 - `reports/placement/audio/*.wav`
+
+## Analyze Multi-Channel Capture
+
+Use channel analysis to verify whether a device exposes useful multi-channel
+data. For a microphone array, use the native mode recommended by `inspect`:
+
+```bash
+PYTHONPATH=src python -m echolab analyze channels \
+  --device hw:2,0 \
+  --sample-rate 16000 \
+  --channels 6 \
+  --out reports/channels
+```
+
+For normal mono USB microphones, use `--channels 1`. EchoLab reports channel
+roles as `unknown` unless a later hardware-specific plugin can prove otherwise.
+
+Outputs:
+
+- `reports/channels/channel_analysis.json`
+- `reports/channels/channel_analysis.csv`
+- `reports/channels/channel_analysis.md`
+- `reports/channels/channel_capture.wav`
 
 ## Project Layout
 
