@@ -9,7 +9,7 @@ import wave
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from statistics import mean
+from statistics import mean, median
 from typing import Any
 
 
@@ -159,10 +159,11 @@ def analyze_channel_wav(wav_path: Path, input_device: str = "unknown") -> Channe
     per_channel = tuple(interleaved[index::channels] for index in range(channels))
     rms_values = [_rms(samples) for samples in per_channel]
     reference_rms = max(rms_values) if rms_values else 0
-    metrics = tuple(
+    base_metrics = tuple(
         _channel_metrics(index, samples, sample_width, reference_rms)
         for index, samples in enumerate(per_channel, start=1)
     )
+    metrics = _apply_role_hints(base_metrics)
     duration_s = frames / sample_rate if sample_rate else 0.0
     return ChannelAnalysisResult(
         wav_path=str(wav_path),
@@ -294,6 +295,74 @@ def _channel_metrics(
     )
 
 
+def _apply_role_hints(metrics: tuple[ChannelMetrics, ...]) -> tuple[ChannelMetrics, ...]:
+    active = tuple(metric for metric in metrics if not _is_silent(metric))
+    if not active:
+        return tuple(_with_role_hint(metric, "likely inactive/silent") for metric in metrics)
+
+    active_rms_values = [metric.rms for metric in active]
+    median_active_rms = median(active_rms_values)
+    louder_threshold = median_active_rms * _db_to_ratio(10.0)
+    prominent = tuple(
+        metric
+        for metric in active
+        if len(active) > 1 and median_active_rms > 0 and metric.rms > louder_threshold
+    )
+    lower_group = tuple(
+        metric
+        for metric in active
+        if metric not in prominent and _has_similar_lower_level_group(metric, active, prominent)
+    )
+
+    hinted: list[ChannelMetrics] = []
+    for metric in metrics:
+        if _is_silent(metric):
+            hinted.append(_with_role_hint(metric, "likely inactive/silent"))
+        elif metric in prominent:
+            hinted.append(_with_role_hint(metric, "likely processed/beamformed or mixed output"))
+        elif metric in lower_group:
+            hinted.append(_with_role_hint(metric, "likely raw/reference microphone channel"))
+        else:
+            hinted.append(metric)
+    return tuple(hinted)
+
+
+def _has_similar_lower_level_group(
+    metric: ChannelMetrics,
+    active: tuple[ChannelMetrics, ...],
+    prominent: tuple[ChannelMetrics, ...],
+) -> bool:
+    candidates = tuple(item for item in active if item not in prominent)
+    if len(candidates) < 2 or metric not in candidates or metric.rms <= 0:
+        return False
+    similar = [
+        item
+        for item in candidates
+        if item.rms > 0 and abs(20.0 * math.log10(item.rms / metric.rms)) <= 4.0
+    ]
+    return len(similar) >= 2
+
+
+def _is_silent(metric: ChannelMetrics) -> bool:
+    return metric.rms == 0 and metric.peak == 0
+
+
+def _with_role_hint(metric: ChannelMetrics, role_hint: str) -> ChannelMetrics:
+    return ChannelMetrics(
+        channel_index=metric.channel_index,
+        rms=metric.rms,
+        peak=metric.peak,
+        clipping_count=metric.clipping_count,
+        speech_activity_ratio=metric.speech_activity_ratio,
+        relative_level_db=metric.relative_level_db,
+        role_hint=role_hint,
+    )
+
+
+def _db_to_ratio(db: float) -> float:
+    return 10.0 ** (db / 20.0)
+
+
 def _speech_activity_ratio(samples: tuple[int, ...]) -> float:
     if not samples:
         return 0.0
@@ -312,7 +381,13 @@ def _interpret_channels(result: ChannelAnalysisResult) -> str:
         return "No channel metrics were available."
     if result.channels == 1:
         return "This device behaves as a mono capture source for this test."
+    role_counts: dict[str, int] = {}
+    for metric in result.metrics:
+        role_counts[metric.role_hint] = role_counts.get(metric.role_hint, 0) + 1
+    role_parts = [f"{count} channel(s) {role}" for role, count in sorted(role_counts.items())]
     levels = [metric.relative_level_db for metric in result.metrics if metric.relative_level_db is not None]
+    if any(metric.role_hint != "unknown" for metric in result.metrics):
+        return "Cautious role hints: " + ", ".join(role_parts) + ". These are level-based hints, not confirmed hardware roles."
     if levels and max(levels) - min(levels) > 12:
         return "Channels show large relative level differences; this may indicate useful multi-channel data or inactive channels. Roles remain unknown."
     return "Channels are present and broadly comparable in level. Roles remain unknown without additional evidence."

@@ -49,3 +49,26 @@ class ChannelAnalysisTest(unittest.TestCase):
             self.assertTrue((tmp_path / "channels.json").exists())
             self.assertTrue((tmp_path / "channels.csv").exists())
             self.assertTrue((tmp_path / "channels.md").exists())
+
+    def test_channel_role_hints_are_level_based_and_cautious(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            wav_path = Path(tmp_dir) / "six_channels.wav"
+            frames = []
+            amplitudes = (1200, 150, 145, 160, 155, 0)
+            for index in range(200):
+                sign = 1 if index % 2 == 0 else -1
+                for amplitude in amplitudes:
+                    frames.append((amplitude * sign).to_bytes(2, "little", signed=True))
+
+            with wave.open(str(wav_path), "wb") as wav:
+                wav.setnchannels(6)
+                wav.setsampwidth(2)
+                wav.setframerate(16000)
+                wav.writeframes(b"".join(frames))
+
+            result = analyze_channel_wav(wav_path, input_device="hw:2,0")
+            hints = [metric.role_hint for metric in result.metrics]
+
+            self.assertEqual(hints[0], "likely processed/beamformed or mixed output")
+            self.assertEqual(hints[1:5], ["likely raw/reference microphone channel"] * 4)
+            self.assertEqual(hints[5], "likely inactive/silent")
