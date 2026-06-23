@@ -26,6 +26,7 @@ def analyze_wav(path: Path) -> BenchmarkRecord:
     max_possible = float(2 ** (8 * sample_width - 1))
     rms_dbfs = _dbfs(rms, max_possible)
     peak_dbfs = _dbfs(peak, max_possible)
+    noise_floor_dbfs = _noise_floor_dbfs(samples, sample_rate, channels, max_possible)
     duration_s = frames / sample_rate if sample_rate else 0.0
     clipping_ratio = _clipping_ratio(samples, sample_width)
 
@@ -44,6 +45,7 @@ def analyze_wav(path: Path) -> BenchmarkRecord:
             Metric("rms_dbfs", rms_dbfs, "dBFS"),
             Metric("peak", peak, "pcm"),
             Metric("peak_dbfs", peak_dbfs, "dBFS"),
+            Metric("noise_floor_dbfs", noise_floor_dbfs, "dBFS"),
             Metric("clipping_ratio", clipping_ratio, "ratio"),
         ),
     )
@@ -76,6 +78,20 @@ def _rms(samples: tuple[int, ...]) -> int:
         return 0
     mean_square = sum(sample * sample for sample in samples) / len(samples)
     return int(math.sqrt(mean_square))
+
+
+def _noise_floor_dbfs(samples: tuple[int, ...], sample_rate: int, channels: int, max_possible: float) -> float:
+    if not samples or sample_rate <= 0 or channels <= 0:
+        return float("-inf")
+    chunk_size = max(1, int(sample_rate * channels * 0.1))
+    chunk_rms_values = [
+        _rms(samples[offset : offset + chunk_size])
+        for offset in range(0, len(samples), chunk_size)
+        if samples[offset : offset + chunk_size]
+    ]
+    if not chunk_rms_values:
+        return float("-inf")
+    return _dbfs(min(chunk_rms_values), max_possible)
 
 
 def _clipping_ratio(samples: tuple[int, ...], sample_width: int) -> float:
