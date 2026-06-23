@@ -92,6 +92,29 @@ Outputs:
 - `reports/wake-asr/wake_asr_report.md`
 - `reports/wake-asr/audio/*.wav`
 
+To compare GeePi ReSpeaker mono mode against native channel extraction, use an
+extended microphone spec. EchoLab records native 6-channel audio from `hw:2,0`
+and scores the extracted mono channel:
+
+```bash
+PYTHONPATH=src python -m echolab benchmark wake-asr \
+  --mic "ReSpeaker mono=plughw:2,0" \
+  --mic "ReSpeaker native CH1=hw:2,0;channels=6;extract_channel=1" \
+  --mic "SunFounder=plughw:1,0" \
+  --distances "0.5,1,2,3" \
+  --angles "front,left,right" \
+  --trials 5 \
+  --speaker-label adult \
+  --condition quiet \
+  --utterance "Hey GeePi" \
+  --wake-command "python scripts/score_wake.py {wav_path}" \
+  --out reports/wake-asr-geepi
+```
+
+The report compares wake detection rate, false negatives, confidence, latency,
+audio RMS/peak, distance drop-off, angle effects, and the recommended GeePi
+capture configuration.
+
 ## Run A GeePi Placement Benchmark
 
 Use the placement benchmark to compare physical microphone locations while

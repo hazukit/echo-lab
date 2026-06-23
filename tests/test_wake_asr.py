@@ -9,6 +9,7 @@ from echolab.benchmark.wake_asr import (
     MicConfig,
     WakeAsrConfig,
     WakeAsrTrial,
+    _extract_channel_wav,
     parse_float_list,
     parse_mic,
     run_wake_asr_benchmark,
@@ -22,6 +23,14 @@ class WakeAsrTest(unittest.TestCase):
 
         self.assertEqual(mic.name, "SunFounder")
         self.assertEqual(mic.device, "plughw:1,0")
+
+    def test_parse_mic_accepts_channel_extraction_options(self) -> None:
+        mic = parse_mic("ReSpeaker CH1=hw:2,0;channels=6;extract_channel=1")
+
+        self.assertEqual(mic.name, "ReSpeaker CH1")
+        self.assertEqual(mic.device, "hw:2,0")
+        self.assertEqual(mic.channels, 6)
+        self.assertEqual(mic.extract_channel, 1)
 
     def test_parse_float_list(self) -> None:
         self.assertEqual(parse_float_list("0.5,1,2"), (0.5, 1.0, 2.0))
@@ -67,6 +76,33 @@ class WakeAsrTest(unittest.TestCase):
             self.assertEqual(payload["benchmark"], "wake_asr")
             self.assertEqual(payload["metadata"]["condition"], "quiet")
 
+    def test_extract_channel_wav_writes_mono_channel(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            source_path = tmp_path / "source.wav"
+            output_path = tmp_path / "channel1.wav"
+            frames = []
+            for _ in range(4):
+                frames.append((1000).to_bytes(2, "little", signed=True))
+                frames.append((200).to_bytes(2, "little", signed=True))
+
+            import wave
+
+            with wave.open(str(source_path), "wb") as wav:
+                wav.setnchannels(2)
+                wav.setsampwidth(2)
+                wav.setframerate(16000)
+                wav.writeframes(b"".join(frames))
+
+            _extract_channel_wav(source_path, output_path, 1)
+
+            with wave.open(str(output_path), "rb") as wav:
+                self.assertEqual(wav.getnchannels(), 1)
+                self.assertEqual(wav.getnframes(), 4)
+                raw = wav.readframes(4)
+            samples = [int.from_bytes(raw[index : index + 2], "little", signed=True) for index in range(0, len(raw), 2)]
+            self.assertEqual(samples, [1000, 1000, 1000, 1000])
+
 
 def _trial(
     mic_name: str,
@@ -88,6 +124,9 @@ def _trial(
         timestamp_utc="2026-01-01T00:00:00+00:00",
         utterance=expected,
         wav_path="sample.wav",
+        scoring_wav_path="sample.wav",
+        capture_channels=1,
+        extracted_channel=None,
         wake_configured=True,
         wake_detected=wake_detected,
         wake_confidence=confidence,

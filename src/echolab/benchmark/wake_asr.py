@@ -24,6 +24,16 @@ DEFAULT_PLACEMENTS = ("default",)
 class MicConfig:
     name: str
     device: str
+    channels: int | None = None
+    extract_channel: int | None = None
+
+    def to_dict(self) -> dict[str, int | str | None]:
+        return {
+            "name": self.name,
+            "device": self.device,
+            "channels": self.channels,
+            "extract_channel": self.extract_channel,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +73,9 @@ class WakeAsrTrial:
     timestamp_utc: str
     utterance: str
     wav_path: str
+    scoring_wav_path: str
+    capture_channels: int
+    extracted_channel: int | None
     wake_configured: bool
     wake_detected: bool | None = None
     wake_confidence: float | None = None
@@ -92,6 +105,9 @@ class WakeAsrTrial:
             "timestamp_utc": self.timestamp_utc,
             "utterance": self.utterance,
             "wav_path": self.wav_path,
+            "scoring_wav_path": self.scoring_wav_path,
+            "capture_channels": self.capture_channels,
+            "extracted_channel": self.extracted_channel,
             "wake_configured": self.wake_configured,
             "wake_detected": self.wake_detected,
             "wake_confidence": self.wake_confidence,
@@ -143,7 +159,7 @@ def write_wake_asr_json(trials: list[WakeAsrTrial], config: WakeAsrConfig, path:
         "benchmark": "wake_asr",
         "created_at": datetime.now(UTC).isoformat(),
         "metadata": {
-            "microphones": [{"name": mic.name, "device": mic.device} for mic in config.microphones],
+            "microphones": [mic.to_dict() for mic in config.microphones],
             "placement_names": list(config.placement_names),
             "placement_notes": config.placement_notes,
             "distances_m": list(config.distances_m),
@@ -179,6 +195,9 @@ def write_wake_asr_csv(trials: list[WakeAsrTrial], path: Path) -> None:
         "timestamp_utc",
         "utterance",
         "wav_path",
+        "scoring_wav_path",
+        "capture_channels",
+        "extracted_channel",
         "wake_configured",
         "wake_detected",
         "wake_confidence",
@@ -186,6 +205,7 @@ def write_wake_asr_csv(trials: list[WakeAsrTrial], path: Path) -> None:
         "audio_rms",
         "audio_peak",
         "audio_noise_floor_dbfs",
+        "false_negative",
         "asr_configured",
         "asr_text",
         "asr_latency_ms",
@@ -196,7 +216,9 @@ def write_wake_asr_csv(trials: list[WakeAsrTrial], path: Path) -> None:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for trial in trials:
-            row = {key: trial.to_dict()[key] for key in fieldnames}
+            row_data = trial.to_dict()
+            row = {key: row_data[key] for key in fieldnames if key in row_data}
+            row["false_negative"] = trial.wake_configured and trial.wake_detected is False
             writer.writerow(row)
 
 
@@ -206,6 +228,9 @@ def write_wake_asr_markdown(trials: list[WakeAsrTrial], config: WakeAsrConfig, p
     best_confidence = _best_device(summary, "mean_wake_confidence")
     best_asr = _best_device(summary, "mean_asr_score")
     dropoff = _distance_dropoff(trials)
+    angle_answer = _angle_answer(trials)
+    capture_answer = _capture_mode_answer(summary)
+    recommended_config = _recommended_capture_config(summary, config)
 
     lines = [
         "# Wake Word + ASR Baseline Comparison",
@@ -216,6 +241,9 @@ def write_wake_asr_markdown(trials: list[WakeAsrTrial], config: WakeAsrConfig, p
         f"- Which mic has higher wake confidence? {_answer(best_confidence)}",
         f"- Which mic gives better ASR text? {_answer(best_asr)}",
         f"- At what distance does performance drop? {dropoff}",
+        f"- Does angle matter? {angle_answer}",
+        f"- Is mono plughw enough, or should GeePi use native CH1 extraction? {capture_answer}",
+        f"- Recommended GeePi capture config: {recommended_config}",
         f"- Is ReSpeaker clearly better than SunFounder? {_respeaker_answer(summary)}",
         "",
         "## Configuration",
@@ -232,18 +260,21 @@ def write_wake_asr_markdown(trials: list[WakeAsrTrial], config: WakeAsrConfig, p
         "",
         "## Device Summary",
         "",
-        "| Mic | Trials | Wake Detection | Mean Wake Confidence | Mean ASR Score | Mean ASR Latency ms | Errors |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Mic | Capture | Trials | Wake Detection | False Negatives | Mean Wake Confidence | Mean Wake Latency ms | RMS | Peak | Errors |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for mic_name, values in sorted(summary.items()):
         lines.append(
             "| "
             f"{mic_name} | "
+            f"{values['capture_mode']} | "
             f"{values['trial_count']} | "
             f"{_pct(values.get('wake_detection_rate'))} | "
+            f"{values['false_negative_count']} | "
             f"{_num(values.get('mean_wake_confidence'))} | "
-            f"{_pct(values.get('mean_asr_score'))} | "
-            f"{_num(values.get('mean_asr_latency_ms'))} | "
+            f"{_num(values.get('mean_wake_latency_ms'))} | "
+            f"{_num(values.get('mean_audio_rms'))} | "
+            f"{_num(values.get('mean_audio_peak'))} | "
             f"{values['error_count']} |"
         )
 
@@ -270,6 +301,25 @@ def write_wake_asr_markdown(trials: list[WakeAsrTrial], config: WakeAsrConfig, p
     lines.extend(
         [
             "",
+            "## Angle Summary",
+            "",
+            "| Mic | Angle | Trials | Wake Detection | Mean Wake Confidence |",
+            "| --- | --- | ---: | ---: | ---: |",
+        ]
+    )
+    for row in _summarize_by_angle(trials):
+        lines.append(
+            "| "
+            f"{row['mic_name']} | "
+            f"{row['angle']} | "
+            f"{row['trial_count']} | "
+            f"{_pct(row.get('wake_detection_rate'))} | "
+            f"{_num(row.get('mean_wake_confidence'))} |"
+        )
+
+    lines.extend(
+        [
+            "",
             "## Raw Result Files",
             "",
             "- `wake_asr_results.json`",
@@ -285,20 +335,30 @@ def write_wake_asr_markdown(trials: list[WakeAsrTrial], config: WakeAsrConfig, p
 
 
 def summarize_wake_asr(trials: list[WakeAsrTrial]) -> dict[str, dict[str, int | float | None]]:
-    summary: dict[str, dict[str, int | float | None]] = {}
+    summary: dict[str, dict[str, int | float | str | None]] = {}
     for mic_name in sorted({trial.mic_name for trial in trials}):
         mic_trials = [trial for trial in trials if trial.mic_name == mic_name]
         wake_trials = [trial for trial in mic_trials if trial.wake_configured]
         detected = [trial for trial in wake_trials if trial.wake_detected is True]
+        missed = [trial for trial in wake_trials if trial.wake_detected is False]
         confidences = [trial.wake_confidence for trial in mic_trials if trial.wake_confidence is not None]
+        wake_latencies = [trial.wake_latency_ms for trial in mic_trials if trial.wake_latency_ms is not None]
         asr_scores = [trial.asr_score for trial in mic_trials if trial.asr_score is not None]
         asr_latencies = [trial.asr_latency_ms for trial in mic_trials if trial.asr_latency_ms is not None]
+        rms_values = [trial.audio_rms for trial in mic_trials if trial.audio_rms is not None]
+        peak_values = [trial.audio_peak for trial in mic_trials if trial.audio_peak is not None]
+        first = mic_trials[0]
         summary[mic_name] = {
             "trial_count": len(mic_trials),
+            "capture_mode": _capture_mode(first),
             "wake_detection_rate": len(detected) / len(wake_trials) if wake_trials else None,
+            "false_negative_count": len(missed),
             "mean_wake_confidence": mean(confidences) if confidences else None,
+            "mean_wake_latency_ms": mean(wake_latencies) if wake_latencies else None,
             "mean_asr_score": mean(asr_scores) if asr_scores else None,
             "mean_asr_latency_ms": mean(asr_latencies) if asr_latencies else None,
+            "mean_audio_rms": mean(rms_values) if rms_values else None,
+            "mean_audio_peak": mean(peak_values) if peak_values else None,
             "error_count": sum(1 for trial in mic_trials if trial.error),
         }
     return summary
@@ -307,12 +367,29 @@ def summarize_wake_asr(trials: list[WakeAsrTrial]) -> dict[str, dict[str, int | 
 def parse_mic(value: str) -> MicConfig:
     if "=" not in value:
         raise ValueError("Microphone must use NAME=DEVICE format, for example SunFounder=plughw:1,0")
-    name, device = value.split("=", 1)
+    name, spec = value.split("=", 1)
     name = name.strip()
-    device = device.strip()
+    parts = [part.strip() for part in spec.split(";") if part.strip()]
+    device = parts[0] if parts else ""
+    options = _parse_mic_options(parts[1:])
     if not name or not device:
         raise ValueError("Microphone name and device must both be non-empty")
-    return MicConfig(name=name, device=device)
+    return MicConfig(
+        name=name,
+        device=device,
+        channels=_optional_int(options.get("channels")),
+        extract_channel=_optional_int(options.get("extract_channel")),
+    )
+
+
+def _parse_mic_options(parts: list[str]) -> dict[str, str]:
+    options: dict[str, str] = {}
+    for part in parts:
+        if "=" not in part:
+            raise ValueError(f"Invalid microphone option: {part}")
+        key, parsed_value = part.split("=", 1)
+        options[key.strip()] = parsed_value.strip()
+    return options
 
 
 def parse_float_list(value: str) -> tuple[float, ...]:
@@ -336,6 +413,7 @@ def _record_trial(config: WakeAsrConfig, mic: MicConfig, wav_path: Path) -> str 
 
 
 def _record_command(config: WakeAsrConfig, mic: MicConfig, wav_path: Path) -> list[str]:
+    channels = mic.channels or config.channels
     if config.record_command:
         return _format_command(
             config.record_command,
@@ -344,7 +422,7 @@ def _record_command(config: WakeAsrConfig, mic: MicConfig, wav_path: Path) -> li
                 "device": mic.device,
                 "duration_s": str(config.duration_s),
                 "sample_rate_hz": str(config.sample_rate_hz),
-                "channels": str(config.channels),
+                "channels": str(channels),
             },
         )
     return [
@@ -356,7 +434,7 @@ def _record_command(config: WakeAsrConfig, mic: MicConfig, wav_path: Path) -> li
         "-r",
         str(config.sample_rate_hz),
         "-c",
-        str(config.channels),
+        str(channels),
         "-d",
         str(max(1, math.ceil(config.duration_s))),
         str(wav_path),
@@ -377,7 +455,11 @@ def _score_trial(
     timestamp = datetime.now(UTC).isoformat()
     wake_raw: dict[str, Any] = {}
     asr_raw: dict[str, Any] = {}
-    audio_metrics = _audio_metrics(wav_path) if error is None and wav_path.exists() else {}
+    scoring_wav_path = _prepare_scoring_wav(mic, wav_path) if error is None and wav_path.exists() else wav_path
+    if error is None and scoring_wav_path is None:
+        error = f"failed to extract channel {mic.extract_channel} from {wav_path}"
+        scoring_wav_path = wav_path
+    audio_metrics = _audio_metrics(scoring_wav_path) if error is None and scoring_wav_path.exists() else {}
     wake_detected: bool | None = None
     wake_confidence: float | None = None
     wake_latency_ms: float | None = None
@@ -385,7 +467,7 @@ def _score_trial(
     asr_latency_ms: float | None = None
 
     if error is None and config.wake_command:
-        wake_raw = _run_json_or_text_command(config.wake_command, wav_path)
+        wake_raw = _run_json_or_text_command(config.wake_command, scoring_wav_path)
         wake_detected = _optional_bool(wake_raw.get("detected"))
         wake_confidence = _optional_float(wake_raw.get("confidence"))
         wake_latency_ms = _optional_float(wake_raw.get("latency_ms"))
@@ -393,7 +475,7 @@ def _score_trial(
             error = str(wake_raw["error"])
 
     if error is None and config.asr_command:
-        asr_raw = _run_json_or_text_command(config.asr_command, wav_path)
+        asr_raw = _run_json_or_text_command(config.asr_command, scoring_wav_path)
         asr_text = _optional_str(asr_raw.get("text"))
         asr_latency_ms = _optional_float(asr_raw.get("latency_ms"))
         if "error" in asr_raw:
@@ -412,6 +494,9 @@ def _score_trial(
         timestamp_utc=timestamp,
         utterance=config.utterance,
         wav_path=str(wav_path),
+        scoring_wav_path=str(scoring_wav_path),
+        capture_channels=mic.channels or config.channels,
+        extracted_channel=mic.extract_channel,
         wake_configured=config.wake_command is not None,
         wake_detected=wake_detected,
         wake_confidence=wake_confidence,
@@ -435,6 +520,43 @@ def _audio_metrics(wav_path: Path) -> dict[str, Any]:
     except (OSError, EOFError, wave.Error, ValueError):
         return {}
     return {metric.name: metric.value for metric in record.metrics}
+
+
+def _prepare_scoring_wav(mic: MicConfig, wav_path: Path) -> Path | None:
+    if mic.extract_channel is None:
+        return wav_path
+    extracted_path = wav_path.with_name(f"{wav_path.stem}_ch{mic.extract_channel}.wav")
+    try:
+        _extract_channel_wav(wav_path, extracted_path, mic.extract_channel)
+    except (OSError, EOFError, wave.Error, ValueError):
+        return None
+    return extracted_path
+
+
+def _extract_channel_wav(source_path: Path, output_path: Path, channel_index: int) -> None:
+    if channel_index < 1:
+        raise ValueError("extract_channel must be 1-based")
+    with wave.open(str(source_path), "rb") as source:
+        channels = source.getnchannels()
+        sample_width = source.getsampwidth()
+        sample_rate = source.getframerate()
+        frames = source.getnframes()
+        raw = source.readframes(frames)
+    if channel_index > channels:
+        raise ValueError(f"extract_channel {channel_index} exceeds WAV channel count {channels}")
+    frame_width = sample_width * channels
+    selected = bytearray()
+    start = (channel_index - 1) * sample_width
+    for offset in range(0, len(raw), frame_width):
+        frame = raw[offset : offset + frame_width]
+        if len(frame) != frame_width:
+            continue
+        selected.extend(frame[start : start + sample_width])
+    with wave.open(str(output_path), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(sample_width)
+        output.setframerate(sample_rate)
+        output.writeframes(bytes(selected))
 
 
 def _run_json_or_text_command(command_template: str, wav_path: Path) -> dict[str, Any]:
@@ -547,7 +669,16 @@ def _optional_str(value: Any) -> str | None:
     return str(value)
 
 
-def _best_device(summary: dict[str, dict[str, int | float | None]], metric: str) -> tuple[str, float] | None:
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _best_device(summary: dict[str, dict[str, int | float | str | None]], metric: str) -> tuple[str, float] | None:
     candidates = [
         (mic_name, value)
         for mic_name, values in summary.items()
@@ -564,7 +695,74 @@ def _answer(best: tuple[str, float] | None) -> str:
     return f"{best[0]} currently leads ({_pct(best[1])})."
 
 
-def _respeaker_answer(summary: dict[str, dict[str, int | float | None]]) -> str:
+def _capture_mode(trial: WakeAsrTrial) -> str:
+    if trial.extracted_channel is not None:
+        return f"{trial.input_device}, {trial.capture_channels}ch -> CH{trial.extracted_channel}"
+    return f"{trial.input_device}, {trial.capture_channels}ch"
+
+
+def _capture_mode_answer(summary: dict[str, dict[str, int | float | str | None]]) -> str:
+    mono = _find_summary(summary, "mono")
+    native = _find_summary(summary, "ch1") or _find_summary(summary, "native")
+    if not mono or not native:
+        return "Not enough mono and native CH1 results to decide."
+    mono_score = _combined_wake_score(mono)
+    native_score = _combined_wake_score(native)
+    if mono_score is None or native_score is None:
+        return "Not scored yet; configure wake scoring for both capture modes."
+    if abs(mono_score - native_score) < 0.03:
+        return "Mono plughw appears sufficient in this run."
+    if native_score > mono_score:
+        return "Native CH1 extraction performs better in this run; consider it for GeePi if runtime complexity is acceptable."
+    return "Mono plughw performs better in this run and is the simpler GeePi capture mode."
+
+
+def _recommended_capture_config(
+    summary: dict[str, dict[str, int | float | str | None]],
+    config: WakeAsrConfig,
+) -> str:
+    best = _best_device(summary, "wake_detection_rate") or _best_device(summary, "mean_wake_confidence")
+    if best is None:
+        first = config.microphones[0] if config.microphones else None
+        if first is None:
+            return "No microphone configured."
+        return _mic_recommendation(first, config)
+    mic = next((item for item in config.microphones if item.name == best[0]), None)
+    return _mic_recommendation(mic, config) if mic else best[0]
+
+
+def _mic_recommendation(mic: MicConfig, config: WakeAsrConfig) -> str:
+    channels = mic.channels or config.channels
+    if mic.extract_channel is not None:
+        return f"{mic.device}, {config.sample_rate_hz} Hz, capture {channels}ch, extract CH{mic.extract_channel}"
+    return f"{mic.device}, {config.sample_rate_hz} Hz, {channels}ch"
+
+
+def _combined_wake_score(values: dict[str, int | float | str | None]) -> float | None:
+    detection = values.get("wake_detection_rate")
+    confidence = values.get("mean_wake_confidence")
+    if isinstance(detection, int | float) and isinstance(confidence, int | float):
+        return float(detection) * 0.75 + float(confidence) * 0.25
+    if isinstance(detection, int | float):
+        return float(detection)
+    if isinstance(confidence, int | float):
+        return float(confidence)
+    return None
+
+
+def _angle_answer(trials: list[WakeAsrTrial]) -> str:
+    rows = _summarize_by_angle(trials)
+    scored = [row for row in rows if isinstance(row.get("wake_detection_rate"), int | float)]
+    if len(scored) < 2:
+        return "Not scored yet; collect wake detections across angles."
+    rates = [float(row["wake_detection_rate"]) for row in scored if isinstance(row.get("wake_detection_rate"), int | float)]
+    if max(rates) - min(rates) < 0.1:
+        return "No strong angle effect in this run."
+    weakest = min(scored, key=lambda row: float(row["wake_detection_rate"]))
+    return f"Yes; weakest observed angle is {weakest['angle']} for {weakest['mic_name']} ({_pct(weakest.get('wake_detection_rate'))})."
+
+
+def _respeaker_answer(summary: dict[str, dict[str, int | float | str | None]]) -> str:
     respeaker = _find_summary(summary, "respeaker")
     sunfounder = _find_summary(summary, "sunfounder")
     if not respeaker or not sunfounder:
@@ -589,8 +787,8 @@ def _respeaker_answer(summary: dict[str, dict[str, int | float | None]]) -> str:
 
 
 def _find_summary(
-    summary: dict[str, dict[str, int | float | None]], needle: str
-) -> dict[str, int | float | None] | None:
+    summary: dict[str, dict[str, int | float | str | None]], needle: str
+) -> dict[str, int | float | str | None] | None:
     for mic_name, values in summary.items():
         if needle in mic_name.lower():
             return values
@@ -642,13 +840,33 @@ def _summarize_by_distance(trials: list[WakeAsrTrial]) -> list[dict[str, int | f
     return rows
 
 
-def _pct(value: int | float | None) -> str:
-    if value is None:
+def _summarize_by_angle(trials: list[WakeAsrTrial]) -> list[dict[str, int | float | str | None]]:
+    rows: list[dict[str, int | float | str | None]] = []
+    keys = sorted({(trial.mic_name, trial.angle) for trial in trials})
+    for mic_name, angle in keys:
+        selected = [trial for trial in trials if trial.mic_name == mic_name and trial.angle == angle]
+        wake_trials = [trial for trial in selected if trial.wake_configured]
+        detected = [trial for trial in wake_trials if trial.wake_detected is True]
+        confidences = [trial.wake_confidence for trial in selected if trial.wake_confidence is not None]
+        rows.append(
+            {
+                "mic_name": mic_name,
+                "angle": angle,
+                "trial_count": len(selected),
+                "wake_detection_rate": len(detected) / len(wake_trials) if wake_trials else None,
+                "mean_wake_confidence": mean(confidences) if confidences else None,
+            }
+        )
+    return rows
+
+
+def _pct(value: int | float | str | None) -> str:
+    if not isinstance(value, int | float):
         return "n/a"
     return f"{float(value) * 100:.1f}%"
 
 
-def _num(value: int | float | None) -> str:
-    if value is None:
+def _num(value: int | float | str | None) -> str:
+    if not isinstance(value, int | float):
         return "n/a"
     return f"{float(value):.3f}"
